@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Defensive Script: Layer 4/7, Cloud Bypass, and Tor Exit Node Blocking
+# Author: Ethical Hacker
+# Note: Ensure you have proper administrative privileges to execute this script.
+
+### CONFIGURATION ###
+# Update and install necessary tools
+echo "[+] Updating system and installing tools..."
+apt update && apt upgrade -y
+apt install iptables nginx tor wget fail2ban -y
+
+### LAYER 4 PROTECTION ###
+echo "[+] Setting up Layer 4 protection with iptables..."
+
+# Drop excessive SYN requests (basic SYN flood defense)
+iptables -A INPUT -p tcp --syn -m connlimit --connlimit-above 20 -j DROP
+
+# Drop malformed packets
+iptables -A INPUT -f -j DROP
+
+# Drop invalid packets
+iptables -A INPUT -m state --state INVALID -j DROP
+
+# Enable connection tracking to prevent abuse
+iptables -A INPUT -p tcp -m conntrack --ctstate NEW --dport 80 -m recent --set
+iptables -A INPUT -p tcp -m conntrack --ctstate NEW --dport 80 -m recent --update --seconds 1 --hitcount 20 -j DROP
+
+### LAYER 7 PROTECTION ###
+echo "[+] Configuring Layer 7 protection with Nginx and rate limiting..."
+
+cat << 'EOF' > /etc/nginx/conf.d/rate_limit.conf
+limit_req_zone $binary_remote_addr zone=limit:10m rate=10r/s;
+server {
+    listen 80;
+    server_name _;
+
+    location / {
+        limit_req zone=limit burst=5 nodelay;
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+
+systemctl restart nginx
+
+### CLOUD BYPASS PROTECTION ###
+echo "[+] Configuring cloud bypass protection..."
+# Only allow traffic from Cloudflare's IP ranges (update these as needed)
+CLOUDFLARE_IPS=$(curl -s https://www.cloudflare.com/ips-v4)
+for ip in $CLOUDFLARE_IPS; do
+    iptables -A INPUT -p tcp -s $ip --dport 80 -j ACCEPT
+done
+iptables -A INPUT -p tcp --dport 80 -j DROP
+
+### TOR EXIT NODE BLOCKING ###
+echo "[+] Blocking Tor exit nodes..."
+wget -q -O - https://check.torproject.org/torbulkexitlist | while read IP; do
+    iptables -A INPUT -s $IP -j DROP
+done
+
+### ADDITIONAL PROTECTIONS ###
+# Install Fail2Ban for automated banning of abusive IPs
+echo "[+] Installing and configuring Fail2Ban..."
+cat << 'EOF' > /etc/fail2ban/jail.local
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+
+[nginx-http-auth]
+enabled = true
+filter = nginx-http-auth
+logpath = /var/log/nginx/error.log
+maxretry = 3
+
+[nginx-limit-req]
+enabled = true
+filter = nginx-limit-req
+logpath = /var/log/nginx/access.log
+maxretry = 10
+EOF
+
+systemctl restart fail2ban
+
+### FINALIZE ###
+echo "[+] DDoS defenses are in place. Monitoring and logging configured."
+echo "[*] Make sure to regularly monitor logs and update configurations."
